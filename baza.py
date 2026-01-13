@@ -1,80 +1,112 @@
 import streamlit as st
-from supabase import create_client, Client
+import sqlite3
+import pandas as pd
 
-# --- KONFIGURACJA POŁĄCZENIA ---
-# Upewnij się, że w Streamlit Cloud masz ustawione Secrets:
-# [Secrets] -> SUPABASE_URL i SUPABASE_KEY
-try:
-    url: str = st.secrets["SUPABASE_URL"]
-    key: str = st.secrets["SUPABASE_KEY"]
-    supabase: Client = create_client(url, key)
-except Exception as e:
-    st.error("Nie znaleziono danych uwierzytelniających Supabase w Secrets.")
-    st.stop()
+# Konfiguracja bazy danych
+DB_NAME = "magazyn.db"
 
-st.set_page_config(page_title="Zarządzanie Sklepem", layout="centered")
-st.title("📦 Zarządzanie Kategoriami")
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Tworzenie tabeli Kategorie
+    c.execute('''CREATE TABLE IF NOT EXISTS kategorie (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nazwa TEXT NOT NULL,
+                    opis TEXT)''')
+    # Tworzenie tabeli Produkty
+    c.execute('''CREATE TABLE IF NOT EXISTS produkty (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    nazwa TEXT NOT NULL,
+                    liczba INTEGER,
+                    cena REAL,
+                    kategoria_id INTEGER,
+                    FOREIGN KEY (kategoria_id) REFERENCES kategorie(id))''')
+    conn.commit()
+    conn.close()
 
-# --- FUNKCJE POMOCNICZE ---
-def get_categories():
-    # Pobieranie danych z bazy
-    response = supabase.table("kategorie").select("*").execute()
-    return response.data
+def get_data(query):
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
 
-# Pobieramy dane na starcie
-categories = get_categories()
+def execute_query(query, params=()):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute(query, params)
+    conn.commit()
+    conn.close()
 
-# --- SEKCJA 1: WYŚWIETLANIE ---
-st.header("📋 Lista Kategorii")
-if categories:
-    st.dataframe(categories, use_container_width=True)
-else:
-    st.info("Baza kategorii jest obecnie pusta.")
+# Inicjalizacja bazy przy starcie
+init_db()
 
-st.divider() # Estetyczna linia oddzielająca
+st.title("📦 System Zarządzania Magazynem")
 
-# --- SEKCJA 2: DODAWANIE ---
-st.header("➕ Dodaj nową kategorię")
-with st.form("add_category_form", clear_on_submit=True):
-    new_name = st.text_input("Nazwa kategorii")
-    new_description = st.text_area("Opis (opcjonalnie)")
-    submit_button = st.form_submit_button("Zapisz w bazie")
+menu = ["Produkty", "Kategorie", "Zarządzaj Danymi"]
+choice = st.sidebar.selectbox("Menu", menu)
 
-    if submit_button:
-        if new_name.strip():
-            try:
-                # Wstawianie danych
-                supabase.table("kategorie").insert({
-                    "nazwa": new_name,
-                    "opis": new_description
-                }).execute()
-               
-                st.success(f"Pomyślnie dodano: {new_name}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Błąd zapisu: {e}")
-        else:
-            st.warning("Musisz podać nazwę kategorii!")
+# --- SEKCJA PRODUKTY ---
+if choice == "Produkty":
+    st.subheader("Lista Produktów")
+    query = '''SELECT p.id, p.nazwa, p.liczba, p.cena, k.nazwa as kategoria 
+               FROM produkty p LEFT JOIN kategorie k ON p.kategoria_id = k.id'''
+    df_prod = get_data(query)
+    st.dataframe(df_prod, use_container_width=True)
 
-st.divider()
+# --- SEKCJA KATEGORIE ---
+elif choice == "Kategorie":
+    st.subheader("Lista Kategorii")
+    df_kat = get_data("SELECT * FROM kategorie")
+    st.table(df_kat)
 
-# --- SEKCJA 3: USUWANIE ---
-st.header("🗑️ Usuń kategorię")
-if categories:
-    # Mapowanie nazwy na ID dla wygody użytkownika
-    cat_options = {c['nazwa']: c['id'] for c in categories}
-    selected_cat_name = st.selectbox("Wybierz kategorię do usunięcia", options=list(cat_options.keys()))
-   
-    if st.button("Usuń trwale", type="primary"):
-        cat_id = cat_options[selected_cat_name]
-        try:
-            # Próba usunięcia
-            supabase.table("kategorie").delete().eq("id", cat_id).execute()
-            st.success(f"Usunięto kategorię: {selected_cat_name}")
+# --- SEKCJA ZARZĄDZAJ (DODAWANIE I USUWANIE) ---
+elif choice == "Zarządzaj Danymi":
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.info("➕ Dodaj Nowe Elementy")
+        
+        # Formularz Kategorii
+        with st.expander("Dodaj Kategorię"):
+            nazwa_kat = st.text_input("Nazwa Kategorii")
+            opis_kat = st.text_area("Opis")
+            if st.button("Zapisz Kategorię"):
+                execute_query("INSERT INTO kategorie (nazwa, opis) VALUES (?, ?)", (nazwa_kat, opis_kat))
+                st.success(f"Dodano kategorię: {nazwa_kat}")
+
+        # Formularz Produktu
+        with st.expander("Dodaj Produkt"):
+            nazwa_prod = st.text_input("Nazwa Produktu")
+            liczba = st.number_input("Ilość", min_value=0, step=1)
+            cena = st.number_input("Cena", min_value=0.0, step=0.01)
+            
+            # Pobranie kategorii do selectboxa
+            kat_df = get_data("SELECT id, nazwa FROM kategorie")
+            kat_options = {row['nazwa']: row['id'] for _, row in kat_df.iterrows()}
+            wybrana_kat = st.selectbox("Wybierz kategorię", options=list(kat_options.keys()))
+
+            if st.button("Zapisz Produkt"):
+                execute_query("INSERT INTO produkty (nazwa, liczba, cena, kategoria_id) VALUES (?, ?, ?, ?)",
+                              (nazwa_prod, liczba, cena, kat_options[wybrana_kat]))
+                st.success(f"Dodano produkt: {nazwa_prod}")
+
+    with col2:
+        st.warning("🗑️ Usuń Elementy")
+        
+        # Usuwanie Produktu
+        st.subheader("Usuń Produkt")
+        prod_df = get_data("SELECT id, nazwa FROM produkty")
+        prod_to_del = st.selectbox("Wybierz produkt do usunięcia", prod_df['nazwa'].tolist())
+        if st.button("Usuń Produkt"):
+            id_prod = prod_df[prod_df['nazwa'] == prod_to_del]['id'].values[0]
+            execute_query("DELETE FROM produkty WHERE id = ?", (int(id_prod),))
             st.rerun()
-        except Exception as e:
-            # Obsługa błędu więzów integralności (Foreign Key Constraint)
-            st.error("Nie można usunąć! Ta kategoria jest prawdopodobnie przypisana do produktów w tabeli 'Produkty'.")
-            st.info("Najpierw usuń lub przesuń produkty z tej kategorii.")
-else:
-    st.write("Brak danych do usunięcia.")
+
+        # Usuwanie Kategorii
+        st.subheader("Usuń Kategorię")
+        kat_df_del = get_data("SELECT id, nazwa FROM kategorie")
+        kat_to_del = st.selectbox("Wybierz kategorię do usunięcia", kat_df_del['nazwa'].tolist())
+        if st.button("Usuń Kategorię"):
+            id_kat = kat_df_del[kat_df_del['nazwa'] == kat_to_del]['id'].values[0]
+            execute_query("DELETE FROM kategorie WHERE id = ?", (int(id_kat),))
+            st.rerun()
