@@ -1,112 +1,152 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
+import plotly.express as px
 
-# Konfiguracja bazy danych
+# Konfiguracja strony
+st.set_page_config(page_title="System Magazynowy Pro", layout="wide", page_icon="📦")
+
 DB_NAME = "magazyn.db"
 
+# --- LOGIKA BAZY DANYCH ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Tworzenie tabeli Kategorie
+    c.execute("PRAGMA foreign_keys = ON;")
     c.execute('''CREATE TABLE IF NOT EXISTS kategorie (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nazwa TEXT NOT NULL,
+                    nazwa TEXT NOT NULL UNIQUE,
                     opis TEXT)''')
-    # Tworzenie tabeli Produkty
     c.execute('''CREATE TABLE IF NOT EXISTS produkty (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     nazwa TEXT NOT NULL,
-                    liczba INTEGER,
-                    cena REAL,
+                    liczba INTEGER DEFAULT 0,
+                    cena REAL DEFAULT 0.0,
                     kategoria_id INTEGER,
-                    FOREIGN KEY (kategoria_id) REFERENCES kategorie(id))''')
+                    FOREIGN KEY (kategoria_id) REFERENCES kategorie(id) ON DELETE CASCADE)''')
     conn.commit()
     conn.close()
 
-def get_data(query):
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
+def get_data(query, params=()):
+    with sqlite3.connect(DB_NAME) as conn:
+        return pd.read_sql_query(query, conn, params=params)
 
 def execute_query(query, params=()):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute(query, params)
-    conn.commit()
-    conn.close()
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute(query, params)
+            conn.commit()
+        return True
+    except Exception as e:
+        st.error(f"Błąd bazy danych: {e}")
+        return False
 
-# Inicjalizacja bazy przy starcie
 init_db()
 
-st.title("📦 System Zarządzania Magazynem")
+# --- MENU BOCZNE ---
+st.sidebar.title("📦 Nawigacja")
+menu = ["📊 Dashboard", "🔎 Przegląd i Edycja", "📂 Kategorie", "⚙️ Administracja"]
+choice = st.sidebar.radio("Przejdź do:", menu)
 
-menu = ["Produkty", "Kategorie", "Zarządzaj Danymi"]
-choice = st.sidebar.selectbox("Menu", menu)
-
-# --- SEKCJA PRODUKTY ---
-if choice == "Produkty":
-    st.subheader("Lista Produktów")
-    query = '''SELECT p.id, p.nazwa, p.liczba, p.cena, k.nazwa as kategoria 
-               FROM produkty p LEFT JOIN kategorie k ON p.kategoria_id = k.id'''
-    df_prod = get_data(query)
-    st.dataframe(df_prod, use_container_width=True)
-
-# --- SEKCJA KATEGORIE ---
-elif choice == "Kategorie":
-    st.subheader("Lista Kategorii")
-    df_kat = get_data("SELECT * FROM kategorie")
-    st.table(df_kat)
-
-# --- SEKCJA ZARZĄDZAJ (DODAWANIE I USUWANIE) ---
-elif choice == "Zarządzaj Danymi":
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.info("➕ Dodaj Nowe Elementy")
+# --- 1. DASHBOARD ---
+if choice == "📊 Dashboard":
+    st.title("📊 Analityka Magazynu")
+    
+    df = get_data('''SELECT p.nazwa, p.liczba, p.cena, k.nazwa as kategoria 
+                     FROM produkty p JOIN kategorie k ON p.kategoria_id = k.id''')
+    
+    if not df.empty:
+        df['Wartość'] = df['liczba'] * df['cena']
         
-        # Formularz Kategorii
-        with st.expander("Dodaj Kategorię"):
-            nazwa_kat = st.text_input("Nazwa Kategorii")
-            opis_kat = st.text_area("Opis")
-            if st.button("Zapisz Kategorię"):
-                execute_query("INSERT INTO kategorie (nazwa, opis) VALUES (?, ?)", (nazwa_kat, opis_kat))
-                st.success(f"Dodano kategorię: {nazwa_kat}")
+        # Metryki u góry
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Wszystkie produkty (szt.)", int(df['liczba'].sum()))
+        m2.metric("Łączna wartość", f"{df['Wartość'].sum():,.2f} zł")
+        m3.metric("Liczba kategorii", df['kategoria'].nunique())
 
-        # Formularz Produktu
-        with st.expander("Dodaj Produkt"):
-            nazwa_prod = st.text_input("Nazwa Produktu")
-            liczba = st.number_input("Ilość", min_value=0, step=1)
-            cena = st.number_input("Cena", min_value=0.0, step=0.01)
-            
-            # Pobranie kategorii do selectboxa
-            kat_df = get_data("SELECT id, nazwa FROM kategorie")
-            kat_options = {row['nazwa']: row['id'] for _, row in kat_df.iterrows()}
-            wybrana_kat = st.selectbox("Wybierz kategorię", options=list(kat_options.keys()))
+        # Wykresy
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_pie = px.pie(df, values='liczba', names='kategoria', title="Struktura zapasów wg kategorii", hole=0.4)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with c2:
+            fig_bar = px.bar(df, x='nazwa', y='Wartość', color='kategoria', title="Wartość finansowa produktów")
+            st.plotly_chart(fig_bar, use_container_width=True)
 
-            if st.button("Zapisz Produkt"):
-                execute_query("INSERT INTO produkty (nazwa, liczba, cena, kategoria_id) VALUES (?, ?, ?, ?)",
-                              (nazwa_prod, liczba, cena, kat_options[wybrana_kat]))
-                st.success(f"Dodano produkt: {nazwa_prod}")
+        # Powiadomienia o niskim stanie
+        low_stock = df[df['liczba'] < 5]
+        if not low_stock.empty:
+            st.warning("⚠️ **Uwaga: Niski stan magazynowy!**")
+            st.write(low_stock[['nazwa', 'liczba']])
+    else:
+        st.info("Dodaj pierwsze dane, aby zobaczyć statystyki.")
 
-    with col2:
-        st.warning("🗑️ Usuń Elementy")
-        
-        # Usuwanie Produktu
-        st.subheader("Usuń Produkt")
-        prod_df = get_data("SELECT id, nazwa FROM produkty")
-        prod_to_del = st.selectbox("Wybierz produkt do usunięcia", prod_df['nazwa'].tolist())
-        if st.button("Usuń Produkt"):
-            id_prod = prod_df[prod_df['nazwa'] == prod_to_del]['id'].values[0]
-            execute_query("DELETE FROM produkty WHERE id = ?", (int(id_prod),))
-            st.rerun()
+# --- 2. PRZEGLĄD I EDYCJA ---
+elif choice == "🔎 Przegląd i Edycja":
+    st.title("🔎 Przegląd i Szybka Edycja")
+    st.write("Możesz edytować stany i ceny bezpośrednio w tabeli.")
+    
+    df_edit = get_data('''SELECT p.id, p.nazwa, p.liczba, p.cena, k.nazwa as kategoria 
+                          FROM produkty p LEFT JOIN kategorie k ON p.kategoria_id = k.id''')
+    
+    # Wykorzystanie st.data_editor do masowej edycji
+    edited_df = st.data_editor(df_edit, key="editor", hide_index=True, use_container_width=True)
+    
+    if st.button("💾 Zapisz zmiany w bazie"):
+        for index, row in edited_df.iterrows():
+            execute_query("UPDATE produkty SET liczba = ?, cena = ? WHERE id = ?", 
+                          (row['liczba'], row['cena'], row['id']))
+        st.success("Dane zostały zaktualizowane!")
+        st.rerun()
 
-        # Usuwanie Kategorii
-        st.subheader("Usuń Kategorię")
-        kat_df_del = get_data("SELECT id, nazwa FROM kategorie")
-        kat_to_del = st.selectbox("Wybierz kategorię do usunięcia", kat_df_del['nazwa'].tolist())
-        if st.button("Usuń Kategorię"):
-            id_kat = kat_df_del[kat_df_del['nazwa'] == kat_to_del]['id'].values[0]
-            execute_query("DELETE FROM kategorie WHERE id = ?", (int(id_kat),))
+# --- 3. KATEGORIE ---
+elif choice == "📂 Kategorie":
+    st.title("📂 Zarządzanie Kategoriami")
+    df_kat = get_data("SELECT id, nazwa, opis FROM kategorie")
+    st.dataframe(df_kat, use_container_width=True, hide_index=True)
+
+# --- 4. ADMINISTRACJA ---
+elif choice == "⚙️ Administracja":
+    st.title("⚙️ Dodawanie i Usuwanie")
+    
+    tab1, tab2 = st.tabs(["➕ Dodaj Nowe", "🗑️ Usuń Dane"])
+    
+    with tab1:
+        col_p, col_k = st.columns(2)
+        with col_p:
+            st.subheader("Nowy Produkt")
+            with st.form("add_p"):
+                p_name = st.text_input("Nazwa produktu")
+                p_qty = st.number_input("Ilość", min_value=0)
+                p_price = st.number_input("Cena (zł)", min_value=0.0)
+                kat_list = get_data("SELECT id, nazwa FROM kategorie")
+                p_kat = st.selectbox("Kategoria", options=kat_list['nazwa'].tolist()) if not kat_list.empty else None
+                
+                if st.form_submit_button("Dodaj Produkt"):
+                    if p_kat:
+                        k_id = kat_list[kat_list['nazwa'] == p_kat]['id'].values[0]
+                        execute_query("INSERT INTO produkty (nazwa, liczba, cena, kategoria_id) VALUES (?,?,?,?)",
+                                      (p_name, p_qty, p_price, int(k_id)))
+                        st.success("Produkt dodany!")
+                    else:
+                        st.error("Najpierw utwórz kategorię!")
+
+        with col_k:
+            st.subheader("Nowa Kategoria")
+            with st.form("add_k"):
+                k_name = st.text_input("Nazwa kategorii")
+                k_desc = st.text_area("Opis")
+                if st.form_submit_button("Dodaj Kategorię"):
+                    execute_query("INSERT INTO kategorie (nazwa, opis) VALUES (?,?)", (k_name, k_desc))
+                    st.success("Kategoria dodana!")
+                    st.rerun()
+
+    with tab2:
+        st.subheader("Usuwanie rekordów")
+        p_list = get_data("SELECT id, nazwa FROM produkty")
+        to_del = st.selectbox("Wybierz produkt do usunięcia", p_list['nazwa'].tolist())
+        if st.button("Usuń wybrany produkt"):
+            execute_query("DELETE FROM produkty WHERE nazwa = ?", (to_del,))
+            st.success("Usunięto!")
             st.rerun()
